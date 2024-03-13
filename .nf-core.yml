@@ -1,0 +1,30 @@
+lint:
+  files_exist:
+  - CODE_OF_CONDUCT.md
+  - assets/nf-core-aksnf_logo_light.png
+  - docs/images/nf-core-aksnf_logo_light.png
+  - docs/images/nf-core-aksnf_logo_dark.png
+  - .github/ISSUE_TEMPLATE/config.yml
+  - .github/workflows/awstest.yml
+  - .github/workflows/awsfulltest.yml
+  - conf/igenomes.config
+  files_unchanged:
+  - CODE_OF_CONDUCT.md
+  - assets/nf-core-aksnf_logo_light.png
+  - docs/images/nf-core-aksnf_logo_light.png
+  - docs/images/nf-core-aksnf_logo_dark.png
+  - .github/ISSUE_TEMPLATE/bug_report.yml
+  multiqc_config:
+  - report_comment
+  nextflow_config:
+  - manifest.name
+  - manifest.homePage
+  - process.cpus
+  - process.memory
+  - process.time
+  - custom_config
+repository_type: pipeline
+template:
+  prefix: testaks
+  skip:
+  - nf_core_configs
