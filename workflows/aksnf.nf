@@ -4,7 +4,7 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
-include { paramsSummaryLog; paramsSummaryMap } from 'plugin/nf-validation'
+include { paramsSummaryLog; paramsSummaryMap; fromSamplesheet } from 'plugin/nf-validation'
 
 def logo = NfcoreTemplate.logo(workflow, params.monochrome_logs)
 def citation = '\n' + WorkflowMain.citation(workflow) + '\n'
@@ -36,6 +36,16 @@ ch_multiqc_custom_methods_description = params.multiqc_methods_description ? fil
 // SUBWORKFLOW: Consisting of a mix of local and nf-core/modules
 //
 include { INPUT_CHECK } from '../subworkflows/local/input_check'
+include { BWAMEM2_INDEX } from '../modules/nf-core/bwamem2/index/main'
+include { PICARD_CREATESEQUENCEDICTIONARY } from '../modules/nf-core/picard/createsequencedictionary/main'
+include { SEQTK_SAMPLE } from '../modules/nf-core/seqtk/sample/main'
+include { BWAMEM2_MEM } from '../modules/nf-core/bwamem2/mem/main'
+include { PICARD_SORTSAM } from '../modules/nf-core/picard/sortsam/main'
+include { PICARD_MARKDUPLICATES } from '../modules/nf-core/picard/markduplicates/main'
+include { PICARD_BEDTOINTERVALLIST as ProbeInterval} from '../modules/nf-core/picard/bedtointervallist/main'
+include { PICARD_BEDTOINTERVALLIST as TargetInterval} from '../modules/nf-core/picard/bedtointervallist/main'
+include { VARDICTJAVA } from '../modules/nf-core/vardictjava/main'
+include { SAMTOOLS_FAIDX } from '../modules/nf-core/samtools/faidx/main'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -49,12 +59,26 @@ include { INPUT_CHECK } from '../subworkflows/local/input_check'
 include { FASTQC                      } from '../modules/nf-core/fastqc/main'
 include { MULTIQC                     } from '../modules/nf-core/multiqc/main'
 include { CUSTOM_DUMPSOFTWAREVERSIONS } from '../modules/nf-core/custom/dumpsoftwareversions/main'
+include { BAM_QC_PICARD } from '../subworkflows/nf-core/bam_qc_picard/main'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     RUN MAIN WORKFLOW
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
+
+fasta       = params.fasta
+                ? Channel.fromPath(params.fasta).first()
+                : Channel.empty()
+
+TargetBed       = params.TargetBed
+                ? Channel.fromPath(params.TargetBed).first()
+                : Channel.empty()
+
+ProbeBed       = params.ProbeBed
+                ? Channel.fromPath(params.ProbeBed).first()
+                : Channel.empty()
+
 
 // Info required for completion email and summary
 def multiqc_report = []
@@ -108,6 +132,79 @@ workflow AKSNF {
         ch_multiqc_logo.toList()
     )
     multiqc_report = MULTIQC.out.report.toList()
+
+    // Configure inputs
+    fqIn_ch = Channel.fromSamplesheet("input").map{ meta, read1, read2 -> [meta, [read1, read2]] }
+    fasta = fasta.map{ fasta -> [ [ id:fasta.baseName ], fasta ] }
+
+    // Generate genome files
+    BWAMEM2_INDEX(fasta)
+    SAMTOOLS_FAIDX(fasta, [['id':null], []])
+    PICARD_CREATESEQUENCEDICTIONARY(fasta)
+
+    fai = SAMTOOLS_FAIDX.out.fai
+    dict = PICARD_CREATESEQUENCEDICTIONARY.out.reference_dict
+
+    // Downsample input fqs
+    DS_ch = fqIn_ch.branch{
+                Sample: it[0]["DownsampleDepth"] && it[0]["DownsampleDepth"] != null
+                No_Sample: it[0]["DownsampleDepth"] == null | !("DownsampleDepth" in it[0]) }
+
+    SEQTK_SAMPLE(
+        DS_ch.Sample
+        .map{ meta, reads -> [meta, reads, meta.DownsampleDepth] } )
+
+    wfIn_ch = DS_ch.No_Sample.mix(SEQTK_SAMPLE.out.reads)
+
+    // Align and Mark Dup
+    BWAMEM2_MEM(
+        wfIn_ch,
+        BWAMEM2_INDEX.out.index,
+        false)
+
+    PICARD_SORTSAM(
+        BWAMEM2_MEM.out.bam,
+        'coordinate')
+
+    PICARD_MARKDUPLICATES(
+        PICARD_SORTSAM.out.bam,
+        fasta,
+        fai)
+
+    ProbeInterval(
+            ProbeBed.map{ProbeBed -> [[ id:ProbeBed.baseName ], ProbeBed]},
+            dict,
+            []
+        )
+
+    TargetInterval(
+            TargetBed.map{TargetBed -> [[ id:TargetBed.baseName ], TargetBed]},
+            dict,
+            []
+        )
+
+    BAM_QC_in = PICARD_MARKDUPLICATES.out.bam.join(PICARD_MARKDUPLICATES.out.bai)
+
+    // BAM_QC_in.view()
+    // TargetBed.view()
+    // ProbeInterval.out.interval_list.view()
+    // TargetInterval.out.interval_list.view()
+
+    BAM_QC_in = BAM_QC_in.map{
+        meta, bam, bai ->
+        [meta, bam, bai, ProbeInterval.out.interval_list.get()[1], TargetInterval.out.interval_list.get()[1]]
+    }
+
+    BAM_QC_PICARD(BAM_QC_in, fasta, fai, dict)
+
+    // // Variant Calling
+    varCallIn_ch = PICARD_MARKDUPLICATES.out.bam.join(PICARD_MARKDUPLICATES.out.bai)
+                        .map{meta, bam, bai -> [meta, bam, bai, TargetBed.get()]}
+
+    // varCallIn_ch.view()
+    VARDICTJAVA(varCallIn_ch,
+        fasta,
+        fai)
 }
 
 /*
